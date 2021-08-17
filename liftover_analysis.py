@@ -18,9 +18,9 @@ def read_in_bed(filepath):
     :type filepath: string
     :param filepath: filepath to bed file
     """
-    table = pd.read_csv(filepath, sep='\t',header=None, 
-    skiprows=30,nrows=20) #rows limited for testing
-    #table = pd.read_csv(filepath, sep='\t',header=None) 
+    #table = pd.read_csv(filepath, sep='\t',header=None, 
+    #skiprows=0,nrows=40) #rows limited for testing
+    table = pd.read_csv(filepath, sep='\t',header=None) 
     table.rename(columns = {0: 'chr', 
                                  1: 'start',
                                     2: 'end', 
@@ -218,7 +218,9 @@ def check_features(original_bed,liftover_bed,unmapped_list,split_list,output_fil
     #get rid of all split and unmapped values 
     processed_original_bed = original_bed[~original_bed['gene_symbol'].isin((unmapped_list + split_list))]
     #define lists to capture all mismatches
-    collated_mismatches = []
+    feature_mismatches = []
+    gene_mismatches = []
+    exon_mismatches = []
     print('Running feature comparison')
     for gene in tqdm(processed_original_bed['gene_symbol'].tolist()):
         # get row chr,start and stop values
@@ -226,6 +228,7 @@ def check_features(original_bed,liftover_bed,unmapped_list,split_list,output_fil
         search_params38, build_38 = search_row_on_ensemble(liftover_bed,gene,server_38)
         returned_37_features_search,returned_38_features_search = [],[]
         returned_37_gene_search,returned_38_gene_search = [],[]
+        returned_37_exon_search,returned_38_exon_search = [],[]
         #Itterate through returned json and seperate results into relevent lists
         for reference in [build_37,build_38]:
             if not reference.ok:
@@ -240,12 +243,17 @@ def check_features(original_bed,liftover_bed,unmapped_list,split_list,output_fil
                                     returned_37_features_search.append(entry['feature_type'])
                                 if entry['feature_type'] == 'gene':
                                     returned_37_gene_search.append(entry['gene_id'])
+                                if entry['feature_type'] == 'exon':
+                                    returned_37_exon_search.append([entry['Parent'],entry['feature_type'],entry['rank']])
                                 stored_37_entry_in_case_of_error = entry
                             else:
                                 if entry['feature_type'] not in returned_38_features_search:
                                      returned_38_features_search.append(entry['feature_type'])
                                 if entry['feature_type'] == 'gene':
-                                    returned_38_gene_search.append(entry['gene_id'])      
+                                    returned_38_gene_search.append(entry['gene_id'])     
+                                if entry['feature_type'] == 'exon':
+                                    returned_38_exon_search.append([entry['Parent'],entry['feature_type'],entry['rank']]) 
+                            
                         #in case returned json has funny keys or is missing the keys
                         except (KeyError,TypeError) as e:
                             print(f'index {search_params37[0]} for gene {str(gene)} failed due to {e}')
@@ -253,28 +261,69 @@ def check_features(original_bed,liftover_bed,unmapped_list,split_list,output_fil
                             print(stored_37_entry_in_case_of_error)
                             print('Entry following liftover')
                             print(entry)
-                            continue                    
+                            continue          
         #Adds to mismatch list if the two arent equal. 
-        #Lists sorted so as lists with the same entries in different orders arent flagged as mismatched 
-        if ((returned_37_gene_search.sort() != returned_38_gene_search.sort()) or 
-        (returned_37_features_search != returned_38_features_search)):
-            #the nested list thats added to the collated lists are just things I thought might be useful
-            #chr_numbers are returned as lists for some reason which is why ive used an index.
-            collated_mismatches.append([search_params37[0],gene,
+        #Lists sorted so as lists with the same entries in different orders arent flagged as mismatched
+        returned_37_features_search.sort()
+        returned_38_features_search.sort()
+        returned_37_gene_search.sort()
+        returned_38_gene_search.sort() 
+        returned_38_exon_search.sort()
+        returned_38_exon_search.sort()
+
+        if returned_37_gene_search != returned_38_gene_search:
+            gene_mismatches.append([search_params37[0],gene,
             search_params37[1],search_params37[2],search_params37[3],
             search_params38[1],search_params38[2],search_params38[3],
             returned_37_gene_search,returned_38_gene_search,
-            ','.join(returned_37_features_search),','.join(returned_38_features_search)])
+            'NA','NA'])
+        if returned_37_exon_search != returned_38_exon_search:
+            missing_in_38 = [exon_details for exon_details in returned_37_exon_search if exon_details not in returned_38_exon_search]
+            exon_mismatches.append([search_params37[0],gene,
+            search_params37[1],search_params37[2],search_params37[3],
+            search_params38[1],search_params38[2],search_params38[3],
+            returned_37_gene_search,returned_38_gene_search,
+            str(returned_37_exon_search),str(missing_in_38)])
+        if (returned_37_features_search != returned_38_features_search):
+            #the nested list thats added to the collated lists are just things I thought might be useful
+            #chr_numbers are returned as lists for some reason which is why ive used an index.
+            if not returned_37_features_search:
+                continue
+            missing_in_38 = [feature for feature in returned_37_features_search if feature not in returned_38_features_search]
+            feature_mismatches.append([search_params37[0],gene,
+            search_params37[1],search_params37[2],search_params37[3],
+            search_params38[1],search_params38[2],search_params38[3],
+            returned_37_gene_search,returned_38_gene_search,
+            str(returned_37_features_search),str(missing_in_38)])
     #Makes a dataframe and adds column names for the data I chose to pull out.
-    mismatch_df = pd.DataFrame(np.array(collated_mismatches),
-                                        columns=['row_index', 'specified_gene', 'og_chr_number', 
-                                        'og_start','og_end','lift_chr_number','lift_start','lift_end',
-                                        'returned_37_genes','returned_38_genes',
-                                        'returned_37_features','returned_38_features'], dtype=object)
-    
-    results_file = output_file + output_filename
-    mismatch_df.to_excel(results_file,index=False)
-    print(mismatch_df)
+    writer = pd.ExcelWriter(f'{output_file}{output_filename}',engine='xlsxwriter')
+    dataframe_list = [gene_mismatches,exon_mismatches,feature_mismatches]
+    for i in range(len(dataframe_list)):
+        if i == 0:
+            sheet_title = 'Gene mismatches'
+        if i == 1:
+            sheet_title = 'Exon mismatches'
+        if i == 2:
+            sheet_title = 'Feature mismatches'
+        columns = ['row_index', 'specified_gene', 
+                    'orig_chr_number','orig_start','orig_end',
+                        'lift_chr_number','lift_start','lift_end',
+                            'returned_37_genes','returned_38_genes',
+                                'returned_37_features/exons','missing_features/exons_in_38']
+        try:
+            dataframe = dataframe_list[i]
+            np.warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)
+            mismatch_df = pd.DataFrame(np.array(dataframe),
+                                            columns=columns, dtype=object)
+        except ValueError:
+            print(f"No mismatches returned for {sheet_title} selection")
+            mismatch_df = pd.DataFrame(columns=columns)
+            mismatch_df = mismatch_df.fillna(0)
+
+        mismatch_df.to_excel(writer,sheet_name=sheet_title,index=False)
+        worksheet = writer.sheets[sheet_title]
+        worksheet.autofilter('A1:M1')
+    writer.save()
 
 def main():
     original = calculate_interval_length(original_bed_filename)
