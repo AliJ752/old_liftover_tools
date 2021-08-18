@@ -3,6 +3,7 @@ import numpy as np
 import requests, sys
 from tqdm import tqdm
 import re
+import time
 
 #filename = r"E:\Pipeline Shared\split_beds_for_analysis\20201014_PanHaemOnc_split_results\UCSC output\20201014_PanHaemOnc_01"
 original_bed_filename = r"E:\Pipeline Shared\20201014_PanHaemOnc.bed"
@@ -19,7 +20,7 @@ def read_in_bed(filepath):
     :param filepath: filepath to bed file
     """
     #table = pd.read_csv(filepath, sep='\t',header=None, 
-    #skiprows=0,nrows=40) #rows limited for testing
+    #skiprows=0,nrows=250) #rows limited for testing
     table = pd.read_csv(filepath, sep='\t',header=None) 
     table.rename(columns = {0: 'chr', 
                                  1: 'start',
@@ -224,8 +225,19 @@ def check_features(original_bed,liftover_bed,unmapped_list,split_list,output_fil
     print('Running feature comparison')
     for gene in tqdm(processed_original_bed['gene_symbol'].tolist()):
         # get row chr,start and stop values
-        search_params37, build_37 = search_row_on_ensemble(processed_original_bed,gene,server_37)
-        search_params38, build_38 = search_row_on_ensemble(liftover_bed,gene,server_38)
+        attempts = 1
+        completed = False
+        while not completed:
+            try:
+                search_params37, build_37 = search_row_on_ensemble(processed_original_bed,gene,server_37)
+                search_params38, build_38 = search_row_on_ensemble(liftover_bed,gene,server_38)
+                completed = True 
+            except requests.exceptions.HTTPError as err:
+                attempts += 1
+                if attempts > 20:
+                    break
+                time.sleep(30)
+
         returned_37_features_search,returned_38_features_search = [],[]
         returned_37_gene_search,returned_38_gene_search = [],[]
         returned_37_exon_search,returned_38_exon_search = [],[]
@@ -239,20 +251,32 @@ def check_features(original_bed,liftover_bed,unmapped_list,split_list,output_fil
                 if 'feature_type' in entry.keys():
                         try:
                             if reference == build_37:
-                                if entry['feature_type'] not in returned_37_features_search:
-                                    returned_37_features_search.append(entry['feature_type'])
+                                if entry['feature_type']=='cds' or entry['feature_type']=='transcript':
+                                    feature = 'transcript/cds'
+                                else:
+                                    feature = entry['feature_type']
+                                if feature not in returned_37_features_search:
+                                        returned_37_features_search.append(feature)
                                 if entry['feature_type'] == 'gene':
                                     returned_37_gene_search.append(entry['gene_id'])
                                 if entry['feature_type'] == 'exon':
-                                    returned_37_exon_search.append([entry['Parent'],entry['feature_type'],entry['rank']])
+                                    string_entry = 'exon:{}'.format(entry['rank'])
+                                    if string_entry not in returned_37_exon_search:
+                                        returned_37_exon_search.append(string_entry)  
                                 stored_37_entry_in_case_of_error = entry
                             else:
-                                if entry['feature_type'] not in returned_38_features_search:
-                                     returned_38_features_search.append(entry['feature_type'])
+                                if entry['feature_type']=='cds' or entry['feature_type']=='transcript':
+                                    feature = 'transcript/cds'
+                                else:
+                                    feature = entry['feature_type']
+                                if feature not in returned_38_features_search:
+                                        returned_38_features_search.append(feature)
                                 if entry['feature_type'] == 'gene':
                                     returned_38_gene_search.append(entry['gene_id'])     
                                 if entry['feature_type'] == 'exon':
-                                    returned_38_exon_search.append([entry['Parent'],entry['feature_type'],entry['rank']]) 
+                                    string_entry = 'exon:{}'.format(entry['rank'])
+                                    if string_entry not in returned_38_exon_search:
+                                        returned_38_exon_search.append(string_entry) 
                             
                         #in case returned json has funny keys or is missing the keys
                         except (KeyError,TypeError) as e:
@@ -268,48 +292,50 @@ def check_features(original_bed,liftover_bed,unmapped_list,split_list,output_fil
         returned_38_features_search.sort()
         returned_37_gene_search.sort()
         returned_38_gene_search.sort() 
-        returned_38_exon_search.sort()
+        returned_37_exon_search.sort()
         returned_38_exon_search.sort()
 
         if returned_37_gene_search != returned_38_gene_search:
-            gene_mismatches.append([search_params37[0],gene,
-            search_params37[1],search_params37[2],search_params37[3],
-            search_params38[1],search_params38[2],search_params38[3],
-            returned_37_gene_search,returned_38_gene_search,
-            'NA','NA'])
-        if returned_37_exon_search != returned_38_exon_search:
-            missing_in_38 = [exon_details for exon_details in returned_37_exon_search if exon_details not in returned_38_exon_search]
-            exon_mismatches.append([search_params37[0],gene,
-            search_params37[1],search_params37[2],search_params37[3],
-            search_params38[1],search_params38[2],search_params38[3],
-            returned_37_gene_search,returned_38_gene_search,
-            str(returned_37_exon_search),str(missing_in_38)])
+            for item in returned_37_gene_search:
+                if item not in returned_38_gene_search:     
+                    gene_mismatches.append([search_params37[0],gene,
+                    f'{search_params37[1]}:{search_params37[2]}-{search_params37[3]}',
+                    f'{search_params38[1]}:{search_params38[2]}-{search_params38[3]}',
+                    returned_37_gene_search,returned_38_gene_search,
+                    'NA','NA'])
+        
         if (returned_37_features_search != returned_38_features_search):
             #the nested list thats added to the collated lists are just things I thought might be useful
             #chr_numbers are returned as lists for some reason which is why ive used an index.
             if not returned_37_features_search:
                 continue
-            missing_in_38 = [feature for feature in returned_37_features_search if feature not in returned_38_features_search]
+            #missing_in_38 = [feature for feature in returned_37_features_search if feature not in returned_38_features_search]
             feature_mismatches.append([search_params37[0],gene,
-            search_params37[1],search_params37[2],search_params37[3],
-            search_params38[1],search_params38[2],search_params38[3],
+            f'{search_params37[1]}:{search_params37[2]}-{search_params37[3]}',
+            f'{search_params38[1]}:{search_params38[2]}-{search_params38[3]}',
             returned_37_gene_search,returned_38_gene_search,
-            str(returned_37_features_search),str(missing_in_38)])
+            str(returned_37_features_search),str(returned_38_features_search)])
+            if ('exon' in returned_37_features_search) & ('exon' not in returned_38_features_search):
+                    exon_mismatches.append([search_params37[0],gene,
+                    f'{search_params37[1]}:{search_params37[2]}-{search_params37[3]}',
+                    f'{search_params38[1]}:{search_params38[2]}-{search_params38[3]}',
+                    returned_37_gene_search,returned_38_gene_search,
+                    str(returned_37_exon_search),str(returned_38_exon_search)])
     #Makes a dataframe and adds column names for the data I chose to pull out.
     writer = pd.ExcelWriter(f'{output_file}{output_filename}',engine='xlsxwriter')
-    dataframe_list = [gene_mismatches,exon_mismatches,feature_mismatches]
+    dataframe_list = [gene_mismatches,feature_mismatches,exon_mismatches]
     for i in range(len(dataframe_list)):
         if i == 0:
             sheet_title = 'Gene mismatches'
         if i == 1:
-            sheet_title = 'Exon mismatches'
-        if i == 2:
             sheet_title = 'Feature mismatches'
+        if i == 2:
+            sheet_title = 'Exon mismatches'
         columns = ['row_index', 'specified_gene', 
-                    'orig_chr_number','orig_start','orig_end',
-                        'lift_chr_number','lift_start','lift_end',
+                    'original_co-ordinates',
+                        'liftover_co-ordinates',
                             'returned_37_genes','returned_38_genes',
-                                'returned_37_features/exons','missing_features/exons_in_38']
+                                'returned_37_features/exons','returned_38_features/exons']
         try:
             dataframe = dataframe_list[i]
             np.warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)
@@ -330,13 +356,13 @@ def main():
     UCSC_bed = calculate_interval_length(UCSC_bed_filename)
     cross_map = calculate_interval_length(cross_map_bed_filename)
     cross_unmapped, cross_split = list_splits_and_unmapped(original,cross_map)
-    #ucsc_unmapped, ucsc_split = list_splits_and_unmapped(original,UCSC_bed)
+    ucsc_unmapped, ucsc_split = list_splits_and_unmapped(original,UCSC_bed)
     #compare_interval_size_nonsplit(original,UCSC_bed,ucsc_unmapped,ucsc_split)
     #compare_interval_size_nonsplit(original,cross_map,cross_unmapped,cross_split)
     #compare_interval_size_split(original,cross_map,cross_unmapped,cross_split)
     #print(split_seperation(cross_map,cross_split))
-    #check_features(original,UCSC_bed,ucsc_unmapped,ucsc_split,'ucsc_mismatch_summary.xlsx')
-    check_features(original,cross_map,cross_unmapped,cross_split,'cross_mismatch_test.xlsx')
+    check_features(original,UCSC_bed,ucsc_unmapped,ucsc_split,'ucsc_mismatch_summary.xlsx')
+    check_features(original,UCSC_bed,ucsc_unmapped,ucsc_split,'ucsc_mismatch_test.xlsx')
     print('Completed Successfully')
 
 
